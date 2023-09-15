@@ -32,6 +32,13 @@ print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
 TORCH_MAJOR = int(torch.__version__.split(".")[0])
 TORCH_MINOR = int(torch.__version__.split(".")[1])
 
+CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability()
+with open('csrc/api/cutlass_fmha.template.cu') as f:
+    cu_template = f.read()
+os.makedirs('csrc/api/build', exist_ok=True)
+with open('csrc/api/build/cutlass_fmha.cu', 'w') as f:
+    f.write(cu_template.replace('##', f'{CC_MAJOR}{CC_MINOR}'))
+
 cmdclass = {}
 ext_modules = []
 
@@ -53,7 +60,7 @@ ext_modules.append(
         name="cutlass_fmha_cpp",
         sources=[
             "csrc/api/fmha_api.cpp",
-            "csrc/api/fused_multi_head_attention.cu",
+            "csrc/api/build/cutlass_fmha.cu",
         ],
         extra_compile_args={
             "cxx": ["-O3", "-std=c++17"] + generator_flag,

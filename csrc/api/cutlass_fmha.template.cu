@@ -21,12 +21,11 @@
 #include "kernel_backward.h"
 
 
-// struct Arch {
-//   static int const kMinComputeCapability = __CUDA_ARCH__ / 10; 
-// };
+using ArchTag = cutlass::arch::Sm##;
 
 
-std::vector<at::Tensor> fmha_forward(
+template <typename data_t, typename scalar_t, typename ArchTag>
+std::vector<at::Tensor> fmha_forward_(
   at::Tensor Q, // B, Nt, H, D
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
@@ -47,8 +46,8 @@ std::vector<at::Tensor> fmha_forward(
   static int const kKeysPerBlock = 64;
 
   using ForwardKernel = AttentionKernel<
-    cutlass::half_t,      // scalar_t
-    cutlass::arch::Sm80,  // ArchTag
+    scalar_t,             // scalar_t
+    ArchTag,              // ArchTag
     true,                 // Memory is aligned
     kQueriesPerBlock,
     kKeysPerBlock,
@@ -58,15 +57,15 @@ std::vector<at::Tensor> fmha_forward(
   >;
 
   typename ForwardKernel::Params p;
-  p.query_ptr = (cutlass::half_t*)(Q.data_ptr<c10::Half>());
-  p.key_ptr = (cutlass::half_t*)(K.data_ptr<c10::Half>());
-  p.value_ptr = (cutlass::half_t*)(V.data_ptr<c10::Half>());
+  p.query_ptr = (scalar_t*)(Q.data_ptr<data_t>());
+  p.key_ptr = (scalar_t*)(K.data_ptr<data_t>());
+  p.value_ptr = (scalar_t*)(V.data_ptr<data_t>());
   p.logsumexp_ptr = nullptr;
   p.output_accum_ptr = nullptr;
   if (ForwardKernel::kNeedsOutputAccumulatorBuffer) {
     cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
   }
-  p.output_ptr = (cutlass::half_t*)(O.data_ptr<c10::Half>());
+  p.output_ptr = (scalar_t*)(O.data_ptr<data_t>());
 
   p.scale = scale;
   p.num_heads = H;
@@ -117,7 +116,8 @@ std::vector<at::Tensor> fmha_forward(
 }
 
 
-std::vector<at::Tensor> fmha_backward(
+template <typename data_t, typename scalar_t, typename ArchTag>
+std::vector<at::Tensor> fmha_backward_(
   at::Tensor Q, // B, Nt, H, D
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
@@ -138,33 +138,40 @@ std::vector<at::Tensor> fmha_backward(
   at::Tensor dV = torch::empty_like(V, V.options());
 
   static constexpr int kMaxK = 64;
-  static constexpr int kBlockSizeI = 64;
-  static constexpr int kBlockSizeJ = 64;
+  static constexpr bool kSupports64x128 =
+      ArchTag::kMinComputeCapability >= 80 ||
+      (ArchTag::kMinComputeCapability >= 70 &&
+      cutlass::sizeof_bits<scalar_t>::value <= 16);
+  static constexpr int kBlockSizeI = kSupports64x128 && kMaxK > 64 ? 128 : 64;
+  static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
+  static constexpr bool kOutputInRF = kIsHalf && kMaxK <= kBlockSizeI;
+  static constexpr bool kPreload = kIsHalf && ArchTag::kMinComputeCapability >= 80 && kOutputInRF;
+  static constexpr int kBlockSizeJ = kPreload && kMaxK > 64 ? 128 : 64;
 
   using BackwardKernel = AttentionBackwardKernel<
-      cutlass::arch::Sm80,
-      cutlass::half_t,
-      true,        // kIsAligned_
-      false,       // kApplyDropout_
-      false,       // kPreload_
-      kBlockSizeI, // kBlockSizeI_,
-      kBlockSizeJ, // kBlockSizeJ_,
-      kMaxK,       // kMaxK
-      false,       // kKeysQueriesAlignedToBlockSize
-      true         // kEnableSplitKeys
+    ArchTag,
+    scalar_t,
+    true,        // kIsAligned_
+    false,       // kApplyDropout_
+    false,       // kPreload_
+    kBlockSizeI, // kBlockSizeI_,
+    kBlockSizeJ, // kBlockSizeJ_,
+    kMaxK,       // kMaxK
+    false,       // kKeysQueriesAlignedToBlockSize
+    true         // kEnableSplitKeys
   >;
 
   typename BackwardKernel::Params p;
-  p.query_ptr = (cutlass::half_t*)(Q.data_ptr<c10::Half>());
-  p.key_ptr = (cutlass::half_t*)(K.data_ptr<c10::Half>());
-  p.value_ptr = (cutlass::half_t*)(V.data_ptr<c10::Half>());
-  p.output_ptr = (cutlass::half_t*)(O.data_ptr<c10::Half>());
+  p.query_ptr = (scalar_t*)(Q.data_ptr<data_t>());
+  p.key_ptr = (scalar_t*)(K.data_ptr<data_t>());
+  p.value_ptr = (scalar_t*)(V.data_ptr<data_t>());
+  p.output_ptr = (scalar_t*)(O.data_ptr<data_t>());
   p.logsumexp_ptr = lse.data_ptr<float>();
   p.delta_ptr = delta.data_ptr<float>();
-  p.grad_output_ptr = (cutlass::half_t*)(dO.data_ptr<c10::Half>());
-  p.grad_query_ptr = (cutlass::half_t*)(dQ.data_ptr<c10::Half>());
-  p.grad_key_ptr = (cutlass::half_t*)(dK.data_ptr<c10::Half>());
-  p.grad_value_ptr = (cutlass::half_t*)(dV.data_ptr<c10::Half>());
+  p.grad_output_ptr = (scalar_t*)(dO.data_ptr<data_t>());
+  p.grad_query_ptr = (scalar_t*)(dQ.data_ptr<data_t>());
+  p.grad_key_ptr = (scalar_t*)(dK.data_ptr<data_t>());
+  p.grad_value_ptr = (scalar_t*)(dV.data_ptr<data_t>());
 
   p.scale = scale;
   p.num_heads = H;
@@ -232,4 +239,38 @@ std::vector<at::Tensor> fmha_backward(
   }
 
   return outputs;
+}
+
+
+
+std::vector<at::Tensor> fmha_forward(
+  at::Tensor Q, // B, Nt, H, D
+  at::Tensor K, // B, Ns, H, D
+  at::Tensor V, // B, Ns, H, D
+  float scale,
+  bool calc_lse
+) {
+  if (Q.dtype() == torch::kFloat32) {
+    return fmha_forward_<float, float, ArchTag>(Q, K, V, scale, calc_lse);
+  } else {
+    return fmha_forward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, scale, calc_lse);
+  }
+}
+
+
+std::vector<at::Tensor> fmha_backward(
+  at::Tensor Q, // B, Nt, H, D
+  at::Tensor K, // B, Ns, H, D
+  at::Tensor V, // B, Ns, H, D
+  at::Tensor O, // B, Nt, H, D
+  at::Tensor dO, // B, Nt, H, D
+  at::Tensor lse, // B, H, Nt
+  at::Tensor delta, // B, H, Nt
+  float scale
+) {
+  if (Q.dtype() == torch::kFloat32) {
+    return fmha_backward_<float, float, ArchTag>(Q, K, V, O, dO, lse, delta, scale);
+  } else {
+    return fmha_backward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, dO, lse, delta, scale);
+  }
 }

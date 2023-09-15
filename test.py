@@ -54,8 +54,8 @@ def test_flash_attention(dtype=torch.float16, device="cuda"):
     ref_dq, q.grad = q.grad.clone(), None
 
     forward_fn = lambda: cutlass_fmha(q, k, v, sm_scale)
-    o = forward_fn()
     backward_fn = lambda: o.backward(do, retain_graph=True)
+    o = forward_fn()
     backward_fn()
     dv, v.grad = v.grad.clone(), None
     dk, k.grad = k.grad.clone(), None
@@ -74,10 +74,11 @@ def test_flash_attention(dtype=torch.float16, device="cuda"):
     torch.testing.assert_close(dk, ref_dk, atol=atol, rtol=rtol)
     torch.testing.assert_close(dv, ref_dv, atol=atol, rtol=rtol)
 
-    forward_flops = profile(forward_fn, 'fwd')
-    backward_flops = profile(backward_fn, 'bwd')
+    forward_flops = profile(forward_fn, f'{dtype} fwd')
+    backward_flops = profile(backward_fn, f'{dtype} bwd')
     return forward_flops, backward_flops
 
 
 torch.manual_seed(2023)
 forward_flops, backward_flops = test_flash_attention(torch.float16)
+forward_flops, backward_flops = test_flash_attention(torch.float32)
