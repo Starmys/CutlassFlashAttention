@@ -42,6 +42,7 @@ std::vector<at::Tensor> fmha_forward(
   auto opts = Q.options();
   at::Tensor O = torch::zeros_like(Q, opts);
 
+  static constexpr int kMaxK = 64; // <- Decrease to 32/16 if your problem is smaller
   static int const kQueriesPerBlock = 64;
   static int const kKeysPerBlock = 64;
 
@@ -51,7 +52,7 @@ std::vector<at::Tensor> fmha_forward(
     true,                 // Memory is aligned
     kQueriesPerBlock,
     kKeysPerBlock,
-    true,                 // Single value iteration
+    kMaxK,
     false,                // Supports dropout
     false                 // Supports bias
   >;
@@ -132,10 +133,11 @@ std::vector<at::Tensor> fmha_backward(
   int Nt = Q.size(1);
   int H = Q.size(2);
   int D = Q.size(3);
-  at::Tensor dQ = torch::zeros_like(Q, Q.options());
-  at::Tensor dK = torch::zeros_like(K, K.options());
-  at::Tensor dV = torch::zeros_like(V, V.options());
+  at::Tensor dQ = torch::empty_like(Q, Q.options());
+  at::Tensor dK = torch::empty_like(K, K.options());
+  at::Tensor dV = torch::empty_like(V, V.options());
 
+  static constexpr int kMaxK = 64;
   static constexpr int kBlockSizeI = 64;
   static constexpr int kBlockSizeJ = 64;
 
@@ -144,10 +146,12 @@ std::vector<at::Tensor> fmha_backward(
       cutlass::half_t,
       true,        // kIsAligned_
       false,       // kApplyDropout_
-      true,        // kPreload_
+      false,       // kPreload_
       kBlockSizeI, // kBlockSizeI_,
       kBlockSizeJ, // kBlockSizeJ_,
-      64           // kMaxK
+      kMaxK,       // kMaxK
+      false,       // kKeysQueriesAlignedToBlockSize
+      true         // kEnableSplitKeys
   >;
 
   typename BackwardKernel::Params p;
@@ -198,6 +202,8 @@ std::vector<at::Tensor> fmha_backward(
   p.delta_strideH = Nt;
   p.lse_strideB = p.lse_strideH * H;
   p.delta_strideB = p.delta_strideH * H;
+
+  p.num_splits_key = Ns / 64;
 
   if (p.workspace_size()) {
       cudaMalloc(&p.workspace, p.workspace_size());
