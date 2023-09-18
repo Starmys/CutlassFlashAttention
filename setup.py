@@ -33,11 +33,12 @@ TORCH_MAJOR = int(torch.__version__.split(".")[0])
 TORCH_MINOR = int(torch.__version__.split(".")[1])
 
 CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability()
+ARCH_TAG = f'{CC_MAJOR}{CC_MINOR}'
 with open('csrc/api/cutlass_fmha.template.cu') as f:
     cu_template = f.read()
 os.makedirs('csrc/api/build', exist_ok=True)
 with open('csrc/api/build/cutlass_fmha.cu', 'w') as f:
-    f.write(cu_template.replace('##', f'{CC_MAJOR}{CC_MINOR}'))
+    f.write(cu_template.replace('##', ARCH_TAG))
 
 cmdclass = {}
 ext_modules = []
@@ -51,7 +52,7 @@ if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.
 
 cc_flag = []
 cc_flag.append("-gencode")
-cc_flag.append("arch=compute_80,code=sm_80")
+cc_flag.append(f"arch=compute_{ARCH_TAG},code=sm_{ARCH_TAG}")
 
 subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
 
