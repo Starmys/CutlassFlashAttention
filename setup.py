@@ -93,10 +93,10 @@ ext_modules.append(
 )
 
 setup(
-    name="cutlass_flash_attention",
+    name="Cutlass Flash Attention",
     version="1.0",
     packages=find_packages(
-        include=("cutlass_flash_attention"),
+        include=("cutlass_flash_attention", "cutlass_flash_attention.*"),
     ),
     author="Chengruidong Zhang",
     author_email="chengzhang@microsoft.com",

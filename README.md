@@ -4,9 +4,7 @@
 
 ## Installation
 ```bash
-git submodule update
-cd csrc/cutlass && git checkout v3.1.0
-cd ../.. && python setup.py install
+python setup.py install
 ```
 
 ## Quick Start
