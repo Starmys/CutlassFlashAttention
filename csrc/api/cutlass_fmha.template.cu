@@ -43,11 +43,6 @@ std::vector<at::Tensor> fmha_forward_(
   auto opts = Q.options();
   at::Tensor O = torch::zeros_like(Q, opts);
 
-  // static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
-  // static constexpr int kMaxK = kIsHalf ? 128 : 64; // <- Decrease to 32/16 if your problem is smaller
-  // static int const kQueriesPerBlock = kIsHalf ? 128 : 64;
-  // static int const kKeysPerBlock = kIsHalf ? 128 : 64;
-
   static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
   static constexpr int kMaxK = 128;
   static constexpr int kQueriesPerBlock = kIsHalf ? 128 : 64;
@@ -152,19 +147,11 @@ std::vector<at::Tensor> fmha_backward_(
   at::Tensor dK = torch::empty_like(K, K.options());
   at::Tensor dV = torch::empty_like(V, V.options());
 
-  // static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
-  // static constexpr int kMaxK = kIsHalf ? 128 : 64;
-  // static constexpr bool kSupports64x128 = false;
-  //     ArchTag::kMinComputeCapability >= 80 || (ArchTag::kMinComputeCapability >= 70 && kIsHalf);
-  // static constexpr int kBlockSizeI = kSupports64x128 && kMaxK > 64 ? 128 : 64;
-  // static constexpr bool kOutputInRF = kIsHalf && kMaxK <= kBlockSizeI;
-  // static constexpr bool kPreload = kIsHalf && ArchTag::kMinComputeCapability >= 80 && kOutputInRF;
-  // static constexpr int kBlockSizeJ = kPreload && kMaxK > 64 ? 128 : 64;
-
   static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
+  static constexpr bool kSupports128x128 = ArchTag::kMinComputeCapability >= 80 && kIsHalf;
   static constexpr int kMaxK = 128;
-  static constexpr int kBlockSizeI = kIsHalf ? 128 : 64;
-  static constexpr int kBlockSizeJ = kIsHalf ? 128 : 64;
+  static constexpr int kBlockSizeI = kSupports128x128 ? 128 : 64;
+  static constexpr int kBlockSizeJ = kSupports128x128 ? 128 : 64;
 
   using BackwardKernel = AttentionBackwardKernel<
     ArchTag,
