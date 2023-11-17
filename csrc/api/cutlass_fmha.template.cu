@@ -3,6 +3,7 @@
 
 
 #include <vector>
+#include "stdio.h"
 
 #include <cuda_fp16.h>
 
@@ -42,9 +43,15 @@ std::vector<at::Tensor> fmha_forward_(
   auto opts = Q.options();
   at::Tensor O = torch::zeros_like(Q, opts);
 
-  static constexpr int kMaxK = 64; // <- Decrease to 32/16 if your problem is smaller
-  static int const kQueriesPerBlock = 64;
-  static int const kKeysPerBlock = 64;
+  // static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
+  // static constexpr int kMaxK = kIsHalf ? 128 : 64; // <- Decrease to 32/16 if your problem is smaller
+  // static int const kQueriesPerBlock = kIsHalf ? 128 : 64;
+  // static int const kKeysPerBlock = kIsHalf ? 128 : 64;
+
+  static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
+  static constexpr int kMaxK = 128;
+  static constexpr int kQueriesPerBlock = kIsHalf ? 128 : 64;
+  static constexpr int kKeysPerBlock = kIsHalf ? 128 : 64;
 
   using ForwardKernel = AttentionKernel<
     scalar_t,             // scalar_t
@@ -145,16 +152,19 @@ std::vector<at::Tensor> fmha_backward_(
   at::Tensor dK = torch::empty_like(K, K.options());
   at::Tensor dV = torch::empty_like(V, V.options());
 
-  static constexpr int kMaxK = 64;
-  static constexpr bool kSupports64x128 =
-      ArchTag::kMinComputeCapability >= 80 ||
-      (ArchTag::kMinComputeCapability >= 70 &&
-      cutlass::sizeof_bits<scalar_t>::value <= 16);
-  static constexpr int kBlockSizeI = kSupports64x128 && kMaxK > 64 ? 128 : 64;
+  // static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
+  // static constexpr int kMaxK = kIsHalf ? 128 : 64;
+  // static constexpr bool kSupports64x128 = false;
+  //     ArchTag::kMinComputeCapability >= 80 || (ArchTag::kMinComputeCapability >= 70 && kIsHalf);
+  // static constexpr int kBlockSizeI = kSupports64x128 && kMaxK > 64 ? 128 : 64;
+  // static constexpr bool kOutputInRF = kIsHalf && kMaxK <= kBlockSizeI;
+  // static constexpr bool kPreload = kIsHalf && ArchTag::kMinComputeCapability >= 80 && kOutputInRF;
+  // static constexpr int kBlockSizeJ = kPreload && kMaxK > 64 ? 128 : 64;
+
   static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
-  static constexpr bool kOutputInRF = kIsHalf && kMaxK <= kBlockSizeI;
-  static constexpr bool kPreload = kIsHalf && ArchTag::kMinComputeCapability >= 80 && kOutputInRF;
-  static constexpr int kBlockSizeJ = kPreload && kMaxK > 64 ? 128 : 64;
+  static constexpr int kMaxK = 128;
+  static constexpr int kBlockSizeI = kIsHalf ? 128 : 64;
+  static constexpr int kBlockSizeJ = kIsHalf ? 128 : 64;
 
   using BackwardKernel = AttentionBackwardKernel<
     ArchTag,
@@ -224,7 +234,7 @@ std::vector<at::Tensor> fmha_backward_(
   p.lse_strideB = p.lse_strideH * H;
   p.delta_strideB = p.delta_strideH * H;
 
-  p.num_splits_key = Ns / 64;
+  p.num_splits_key = Ns / kMaxK;
 
   if (p.workspace_size()) {
       cudaMalloc(&p.workspace, p.workspace_size());

@@ -3,9 +3,6 @@ import torch
 from cutlass_flash_attention import FlashMultiHeadAttention
 
 
-BATCH, N_HEADS, N_CTX, D_HEAD = 8, 16, 1024, 64
-
-
 def attention_forward_reference(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -25,7 +22,8 @@ def attention_forward_reference(
     return out
 
 
-def profile(fn, mode='fwd', warmup=25, rep=100):
+def profile(fn, shape, mode='fwd', causal=False, warmup=25, rep=100):
+    batch, n_ctx, n_heads, d_head = shape
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -35,7 +33,11 @@ def profile(fn, mode='fwd', warmup=25, rep=100):
     torch.cuda.synchronize()
     end = time.time()
     latency = (end - start) * 1e3 / rep
-    flops_per_matmul = 2. * BATCH * N_HEADS * N_CTX * N_CTX * D_HEAD
+    flops_per_matmul = 2. * batch * n_heads * d_head
+    if causal:
+        flops_per_matmul *= 0.5 * n_ctx * (n_ctx + 1)
+    else:
+        flops_per_matmul *= n_ctx * n_ctx
     total_flops = 2 * flops_per_matmul
     if mode == 'bwd':
         total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
@@ -43,12 +45,13 @@ def profile(fn, mode='fwd', warmup=25, rep=100):
     print(f'{mode}: {latency:.3f} ms | {gflops:.3f} GFLOP/s')
 
 
-def test_flash_attention(causal=False, dtype=torch.float16, device="cuda"):
-    q = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
-    k = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
-    v = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
-    do = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=False)
-    sm_scale = D_HEAD ** -0.5
+def test_flash_attention(shape, causal=False, dtype=torch.float16, device="cuda"):
+    batch, n_ctx, n_heads, d_head = shape
+    q = torch.randn((batch, n_ctx, n_heads, d_head), dtype=dtype, device=device, requires_grad=True)
+    k = torch.randn((batch, n_ctx, n_heads, d_head), dtype=dtype, device=device, requires_grad=True)
+    v = torch.randn((batch, n_ctx, n_heads, d_head), dtype=dtype, device=device, requires_grad=True)
+    do = torch.randn((batch, n_ctx, n_heads, d_head), dtype=dtype, device=device, requires_grad=False)
+    sm_scale = d_head ** -0.5
 
     cutlass_fmha = FlashMultiHeadAttention(training=True, causal=causal)
 
@@ -79,13 +82,14 @@ def test_flash_attention(causal=False, dtype=torch.float16, device="cuda"):
     torch.testing.assert_close(dk, ref_dk, atol=atol, rtol=rtol)
     torch.testing.assert_close(dv, ref_dv, atol=atol, rtol=rtol)
 
-    forward_flops = profile(forward_fn, f'[Causal={causal}] {dtype} fwd')
-    backward_flops = profile(backward_fn, f'[Causal={causal}] {dtype} bwd')
+    forward_flops = profile(forward_fn, shape, f'[Causal={str(causal)[0]} | {dtype} | FWD]', causal)
+    backward_flops = profile(backward_fn, shape, f'[Causal={str(causal)[0]} | {dtype} | BWD]', causal)
+    # backward_flops = 0
     return forward_flops, backward_flops
 
 
 torch.manual_seed(2023)
-forward_flops, backward_flops = test_flash_attention(causal=False, dtype=torch.float16)
-forward_flops, backward_flops = test_flash_attention(causal=False, dtype=torch.float32)
-forward_flops, backward_flops = test_flash_attention(causal=True, dtype=torch.float16)
-forward_flops, backward_flops = test_flash_attention(causal=True, dtype=torch.float32)
+forward_flops, backward_flops = test_flash_attention((2, 1024, 32, 128), causal=False, dtype=torch.float16)
+forward_flops, backward_flops = test_flash_attention((2, 1024, 32, 128), causal=False, dtype=torch.float32)
+forward_flops, backward_flops = test_flash_attention((2, 1024, 32, 128), causal=True, dtype=torch.float16)
+forward_flops, backward_flops = test_flash_attention((2, 1024, 32, 128), causal=True, dtype=torch.float32)
