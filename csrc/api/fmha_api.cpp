@@ -10,7 +10,8 @@ std::vector<at::Tensor> fmha_forward(
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
   float scale,
-  bool calc_lse
+  bool calc_lse,
+  bool causal
 );
 
 
@@ -22,7 +23,8 @@ std::vector<at::Tensor> fmha_backward(
   at::Tensor dO, // B, Nt, H, D
   at::Tensor lse, // B, H, Nt
   at::Tensor delta, // B, H, Nt
-  float scale
+  float scale,
+  bool causal
 );
 
 

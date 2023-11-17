@@ -11,10 +11,15 @@ def attention_forward_reference(
     key: torch.Tensor,
     value: torch.Tensor,
     sm_scale: float,
+    causal: bool,
 ) -> torch.Tensor:
-    p = torch.einsum(f'bmhk, bnhk -> bhmn', query, key).to(torch.float32) * sm_scale
-    p_max = p.max(-1, keepdim=True).values
-    p_exp = torch.exp(p - p_max)
+    qk = torch.einsum(f'bmhk, bnhk -> bhmn', query, key).to(torch.float32) * sm_scale
+    if causal:
+        b, h, m, n = qk.shape
+        mask = torch.arange(0, m, device=qk.device)[:, None] >= torch.arange(0, n, device=qk.device)[None, :]
+        qk = qk.where(mask[None, None, :, :], qk - torch.inf)
+    p_max = qk.max(-1, keepdim=True).values
+    p_exp = torch.exp(qk - p_max)
     s = p_exp / (p_exp.sum(-1, keepdim=True) + 1e-6)
     out = torch.einsum(f'bhmn, bnhk -> bmhk', s.to(value.dtype), value)
     return out
@@ -38,16 +43,16 @@ def profile(fn, mode='fwd', warmup=25, rep=100):
     print(f'{mode}: {latency:.3f} ms | {gflops:.3f} GFLOP/s')
 
 
-def test_flash_attention(dtype=torch.float16, device="cuda"):
+def test_flash_attention(causal=False, dtype=torch.float16, device="cuda"):
     q = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
     k = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
     v = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
     do = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=False)
     sm_scale = D_HEAD ** -0.5
 
-    cutlass_fmha = FlashMultiHeadAttention(training=True)
+    cutlass_fmha = FlashMultiHeadAttention(training=True, causal=causal)
 
-    ref_o = attention_forward_reference(q, k, v, sm_scale)
+    ref_o = attention_forward_reference(q, k, v, sm_scale, causal)
     ref_o.backward(do)
     ref_dv, v.grad = v.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -74,11 +79,13 @@ def test_flash_attention(dtype=torch.float16, device="cuda"):
     torch.testing.assert_close(dk, ref_dk, atol=atol, rtol=rtol)
     torch.testing.assert_close(dv, ref_dv, atol=atol, rtol=rtol)
 
-    forward_flops = profile(forward_fn, f'{dtype} fwd')
-    backward_flops = profile(backward_fn, f'{dtype} bwd')
+    forward_flops = profile(forward_fn, f'[Causal={causal}] {dtype} fwd')
+    backward_flops = profile(backward_fn, f'[Causal={causal}] {dtype} bwd')
     return forward_flops, backward_flops
 
 
 torch.manual_seed(2023)
-forward_flops, backward_flops = test_flash_attention(torch.float16)
-forward_flops, backward_flops = test_flash_attention(torch.float32)
+forward_flops, backward_flops = test_flash_attention(causal=False, dtype=torch.float16)
+forward_flops, backward_flops = test_flash_attention(causal=False, dtype=torch.float32)
+forward_flops, backward_flops = test_flash_attention(causal=True, dtype=torch.float16)
+forward_flops, backward_flops = test_flash_attention(causal=True, dtype=torch.float32)

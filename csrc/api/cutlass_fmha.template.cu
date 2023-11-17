@@ -30,7 +30,8 @@ std::vector<at::Tensor> fmha_forward_(
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
   float scale,
-  bool calc_lse
+  bool calc_lse,
+  bool causal
 ) {
   cudaSetDevice(Q.get_device());
   int B = Q.size(0);
@@ -66,6 +67,12 @@ std::vector<at::Tensor> fmha_forward_(
     cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
   }
   p.output_ptr = (scalar_t*)(O.data_ptr<data_t>());
+
+  if (causal) {
+    p.custom_mask_type = ForwardKernel::CausalFromTopLeft;
+  } else {
+    p.custom_mask_type = ForwardKernel::NoCustomMask;
+  }
 
   p.scale = scale;
   p.num_heads = H;
@@ -125,7 +132,8 @@ std::vector<at::Tensor> fmha_backward_(
   at::Tensor dO, // B, Nt, H, D
   at::Tensor lse, // B, H, Nt
   at::Tensor delta, // B, H, Nt
-  float scale
+  float scale,
+  bool causal
 ) {
   cudaSetDevice(Q.get_device());
   int B = Q.size(0);
@@ -172,6 +180,12 @@ std::vector<at::Tensor> fmha_backward_(
   p.grad_query_ptr = (scalar_t*)(dQ.data_ptr<data_t>());
   p.grad_key_ptr = (scalar_t*)(dK.data_ptr<data_t>());
   p.grad_value_ptr = (scalar_t*)(dV.data_ptr<data_t>());
+
+  if (causal) {
+    p.custom_mask_type = BackwardKernel::CausalFromTopLeft;
+  } else {
+    p.custom_mask_type = BackwardKernel::NoCustomMask;
+  }
 
   p.scale = scale;
   p.num_heads = H;
@@ -248,12 +262,13 @@ std::vector<at::Tensor> fmha_forward(
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
   float scale,
-  bool calc_lse
+  bool calc_lse,
+  bool causal
 ) {
   if (Q.dtype() == torch::kFloat32) {
-    return fmha_forward_<float, float, ArchTag>(Q, K, V, scale, calc_lse);
+    return fmha_forward_<float, float, ArchTag>(Q, K, V, scale, calc_lse, causal);
   } else {
-    return fmha_forward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, scale, calc_lse);
+    return fmha_forward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, scale, calc_lse, causal);
   }
 }
 
@@ -266,11 +281,12 @@ std::vector<at::Tensor> fmha_backward(
   at::Tensor dO, // B, Nt, H, D
   at::Tensor lse, // B, H, Nt
   at::Tensor delta, // B, H, Nt
-  float scale
+  float scale,
+  bool causal
 ) {
   if (Q.dtype() == torch::kFloat32) {
-    return fmha_backward_<float, float, ArchTag>(Q, K, V, O, dO, lse, delta, scale);
+    return fmha_backward_<float, float, ArchTag>(Q, K, V, O, dO, lse, delta, scale, causal);
   } else {
-    return fmha_backward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, dO, lse, delta, scale);
+    return fmha_backward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, dO, lse, delta, scale, causal);
   }
 }
