@@ -1,10 +1,11 @@
 ## Prerequsites
 - PyTorch
 - NVCC >= 11.3
+- CUDA Compute Capacity >= 7.0
 
 ## Installation
 ```bash
-python setup.py install
+pip install git+https://github.com/Starmys/CutlassFlashAttention.git
 ```
 
 ## Quick Start
@@ -12,7 +13,7 @@ python setup.py install
 import torch
 from cutlass_flash_attention import FlashMultiHeadAttention
 
-BATCH, N_HEADS, N_CTX, D_HEAD = 8, 32, 1024, 64
+BATCH, N_CTX, N_HEADS, D_HEAD = 2, 1024, 32, 128
 dtype = torch.float32
 device = 'cuda'
 
@@ -21,7 +22,7 @@ k = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, req
 v = torch.randn((BATCH, N_CTX, N_HEADS, D_HEAD), dtype=dtype, device=device, requires_grad=True)
 scale = D_HEAD ** -0.5
 
-fmha = FlashMultiHeadAttention()
+fmha = FlashMultiHeadAttention(training=True, causal=True)
 
-o = cutlass_fmha(q, k, v, scale)
+o = fmha(q, k, v, scale)
 ```
