@@ -14,7 +14,10 @@ class _FMHA(torch.autograd.Function):
         scale: float,
         causal: bool,
     ):
-        out, lse = cutlass_fmha_cpp.forward(query, key, value, scale, True, causal)
+        batch_size, seq_len, head_num, head_dim = query.shape
+        out = torch.empty_like(query)
+        lse = torch.empty(size=(batch_size, head_num, seq_len), dtype=torch.float32, device=query.device)
+        cutlass_fmha_cpp.forward_training(query, key, value, out, lse, scale, causal)
         ctx.save_for_backward(query, key, value, out, lse)
         ctx.scale = scale
         ctx.causal = causal
@@ -27,10 +30,13 @@ class _FMHA(torch.autograd.Function):
     ):
         query, key, value, out, lse = ctx.saved_tensors
         delta = (grad.float() * out.float()).sum(-1).transpose(-2, -1).contiguous()
-        grad_q, grad_k, grad_v = cutlass_fmha_cpp.backward(
+        grad_q = torch.empty_like(query)
+        grad_k = torch.empty_like(key)
+        grad_v = torch.empty_like(value)
+        cutlass_fmha_cpp.backward(
             query, key, value, out,
-            grad, lse, delta,
-            ctx.scale, ctx.causal,
+            grad_q, grad_k, grad_v, grad,
+            lse, delta, ctx.scale, ctx.causal,
         )
         return grad_q, grad_k, grad_v, None, None
 
@@ -46,7 +52,9 @@ class FlashMultiHeadAttention(torch.nn.Module):
         return _FMHA.apply(query, key, value, scale, self._causal)
 
     def _forward_test(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, scale: float) -> torch.Tensor:
-        return cutlass_fmha_cpp.forward(query, key, value, scale, False, self._causal)[0]
+        out = torch.empty_like(query)
+        cutlass_fmha_cpp.forward_inference(query, key, value, out, scale, self._causal)
+        return out
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, scale: float) -> torch.Tensor:
         return self._forward_func(query, key, value, scale)

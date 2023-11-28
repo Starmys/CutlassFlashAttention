@@ -3,7 +3,7 @@ import torch
 from cutlass_flash_attention import FlashMultiHeadAttention
 
 
-BATCH, N_CTX, N_HEADS, D_HEAD = 2, 256, 32, 128
+BATCH, N_CTX, N_HEADS, D_HEAD = 1, 2048, 32, 128
 
 
 def attention_forward_reference(
@@ -25,7 +25,7 @@ def attention_forward_reference(
     return out
 
 
-def profile(fn, mode='fwd', causal=False, warmup=25, rep=100):
+def profile(fn, title, causal=False, warmup=2500, rep=10000):
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -41,10 +41,10 @@ def profile(fn, mode='fwd', causal=False, warmup=25, rep=100):
     else:
         flops_per_matmul *= N_CTX * N_CTX
     total_flops = 2 * flops_per_matmul
-    if mode == 'bwd':
+    if 'BWD' in title:
         total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
     gflops = total_flops / latency * 1e-9
-    print(f'{mode}: {latency:.3f} ms | {gflops:.3f} GFLOP/s')
+    print(f'{title} {latency:.3f} ms | {gflops:.3f} GFLOP/s')
 
 
 def test_flash_attention(causal=False, dtype=torch.float16, device="cuda"):

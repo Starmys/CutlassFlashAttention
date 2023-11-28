@@ -26,12 +26,12 @@ using ArchTag = cutlass::arch::Sm##;
 
 
 template <typename data_t, typename scalar_t, typename ArchTag>
-std::vector<at::Tensor> fmha_forward_(
+void fmha_forward_inference_(
   at::Tensor Q, // B, Nt, H, D
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
+  at::Tensor O, // B, Nt, H, D
   float scale,
-  bool calc_lse,
   bool causal
 ) {
   cudaSetDevice(Q.get_device());
@@ -40,8 +40,6 @@ std::vector<at::Tensor> fmha_forward_(
   int Nt = Q.size(1);
   int H = Q.size(2);
   int D = Q.size(3);
-  auto opts = Q.options();
-  at::Tensor O = torch::zeros_like(Q, opts);
 
   static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
   static constexpr int kMaxK = 128;
@@ -95,12 +93,100 @@ std::vector<at::Tensor> fmha_forward_(
   p.v_strideB = p.v_strideM * Ns;
   p.o_strideM = p.head_dim_value * p.num_heads;
 
-  std::vector<at::Tensor> outputs = {O};
-  if (calc_lse) {
-    at::Tensor lse = torch::empty({B, H, Nt}, opts.dtype(at::kFloat));
-    p.logsumexp_ptr = lse.data_ptr<float>();
-    outputs.push_back(lse);
+  constexpr auto kernel_fn = attention_kernel_batched_impl<ForwardKernel>;
+
+  int smem_bytes = sizeof(typename ForwardKernel::SharedStorage);
+  if (smem_bytes > 0xc000) {
+    cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
   }
+
+  if (!ForwardKernel::check_supported(p)) {
+    std::cerr << "Kernel does not support these inputs" << std::endl;
+    return;
+  }
+
+  kernel_fn<<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes>>>(p);
+
+  if (ForwardKernel::kNeedsOutputAccumulatorBuffer) {
+    cudaFree(p.output_accum_ptr);
+  }
+
+  cudaError_t result = cudaDeviceSynchronize();
+  if (result != cudaSuccess)  {
+    std::cerr << "Kernel execution error: " << cudaGetErrorString(result);
+  }
+}
+
+
+template <typename data_t, typename scalar_t, typename ArchTag>
+void fmha_forward_training_(
+  at::Tensor Q, // B, Nt, H, D
+  at::Tensor K, // B, Ns, H, D
+  at::Tensor V, // B, Ns, H, D
+  at::Tensor O, // B, Nt, H, D
+  at::Tensor lse, // B, H, Nt
+  float scale,
+  bool causal
+) {
+  cudaSetDevice(Q.get_device());
+  int B = Q.size(0);
+  int Ns = K.size(1);
+  int Nt = Q.size(1);
+  int H = Q.size(2);
+  int D = Q.size(3);
+
+  static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
+  static constexpr int kMaxK = 128;
+  static constexpr int kQueriesPerBlock = kIsHalf ? 128 : 64;
+  static constexpr int kKeysPerBlock = kIsHalf ? 128 : 64;
+
+  using ForwardKernel = AttentionKernel<
+    scalar_t,             // scalar_t
+    ArchTag,              // ArchTag
+    true,                 // Memory is aligned
+    kQueriesPerBlock,
+    kKeysPerBlock,
+    kMaxK,
+    false,                // Supports dropout
+    false                 // Supports bias
+  >;
+
+  typename ForwardKernel::Params p;
+  p.query_ptr = (scalar_t*)(Q.data_ptr<data_t>());
+  p.key_ptr = (scalar_t*)(K.data_ptr<data_t>());
+  p.value_ptr = (scalar_t*)(V.data_ptr<data_t>());
+  p.logsumexp_ptr = nullptr;
+  p.output_accum_ptr = nullptr;
+  if (ForwardKernel::kNeedsOutputAccumulatorBuffer) {
+    cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
+  }
+  p.output_ptr = (scalar_t*)(O.data_ptr<data_t>());
+
+  if (causal) {
+    p.custom_mask_type = ForwardKernel::CausalFromTopLeft;
+  } else {
+    p.custom_mask_type = ForwardKernel::NoCustomMask;
+  }
+
+  p.scale = scale;
+  p.num_heads = H;
+  p.num_batches = B;
+  p.head_dim = D;
+  p.head_dim_value = D;
+  p.num_queries = Nt;
+  p.num_keys = Ns;
+
+  p.q_strideH = D;
+  p.k_strideH = D;
+  p.v_strideH = D;
+  p.q_strideM = p.q_strideH * H;
+  p.k_strideM = p.k_strideH * H;
+  p.v_strideM = p.v_strideH * H;
+  p.q_strideB = p.q_strideM * Nt;
+  p.k_strideB = p.k_strideM * Ns;
+  p.v_strideB = p.v_strideM * Ns;
+  p.o_strideM = p.head_dim_value * p.num_heads;
+  p.logsumexp_ptr = lse.data_ptr<float>();
 
   constexpr auto kernel_fn = attention_kernel_batched_impl<ForwardKernel>;
 
@@ -111,26 +197,30 @@ std::vector<at::Tensor> fmha_forward_(
 
   if (!ForwardKernel::check_supported(p)) {
     std::cerr << "Kernel does not support these inputs" << std::endl;
-    return outputs;
   }
 
   kernel_fn<<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes>>>(p);
+
+  if (ForwardKernel::kNeedsOutputAccumulatorBuffer) {
+    cudaFree(p.output_accum_ptr);
+  }
 
   cudaError_t result = cudaDeviceSynchronize();
   if (result != cudaSuccess)  {
     std::cerr << "Kernel execution error: " << cudaGetErrorString(result);
   }
-
-  return outputs;
 }
 
 
 template <typename data_t, typename scalar_t, typename ArchTag>
-std::vector<at::Tensor> fmha_backward_(
+void fmha_backward_(
   at::Tensor Q, // B, Nt, H, D
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
   at::Tensor O, // B, Nt, H, D
+  at::Tensor dQ, // B, Nt, H, D
+  at::Tensor dK, // B, Ns, H, D
+  at::Tensor dV, // B, Ns, H, D
   at::Tensor dO, // B, Nt, H, D
   at::Tensor lse, // B, H, Nt
   at::Tensor delta, // B, H, Nt
@@ -143,9 +233,6 @@ std::vector<at::Tensor> fmha_backward_(
   int Nt = Q.size(1);
   int H = Q.size(2);
   int D = Q.size(3);
-  at::Tensor dQ = torch::empty_like(Q, Q.options());
-  at::Tensor dK = torch::empty_like(K, K.options());
-  at::Tensor dV = torch::empty_like(V, V.options());
 
   static constexpr bool kIsHalf = cutlass::sizeof_bits<scalar_t>::value <= 16;
   static constexpr bool kSupports128x128 = ArchTag::kMinComputeCapability >= 80 && kIsHalf;
@@ -227,8 +314,6 @@ std::vector<at::Tensor> fmha_backward_(
       cudaMalloc(&p.workspace, p.workspace_size());
   }
 
-  std::vector<at::Tensor> outputs = {dQ, dK, dV};
-
   auto kernel_fn = attention_kernel_backward_batched_impl<BackwardKernel>;
 
   int smem_bytes = sizeof(typename BackwardKernel::SharedStorage);
@@ -238,43 +323,63 @@ std::vector<at::Tensor> fmha_backward_(
 
   if (!BackwardKernel::check_supported(p)) {
     std::cerr << "Kernel does not support these inputs" << std::endl;
-    return outputs;
   }
 
   kernel_fn<<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes>>>(p);
+
+  if (p.workspace_size()) {
+    cudaFree(p.workspace);
+  }
 
   // Wait for completion
   cudaError_t result = cudaDeviceSynchronize();
   if (result != cudaSuccess)  {
     std::cerr << "Kernel execution error: " << cudaGetErrorString(result);
   }
-
-  return outputs;
 }
 
 
-
-std::vector<at::Tensor> fmha_forward(
-  at::Tensor Q, // B, Nt, H, D
-  at::Tensor K, // B, Ns, H, D
-  at::Tensor V, // B, Ns, H, D
-  float scale,
-  bool calc_lse,
-  bool causal
-) {
-  if (Q.dtype() == torch::kFloat32) {
-    return fmha_forward_<float, float, ArchTag>(Q, K, V, scale, calc_lse, causal);
-  } else {
-    return fmha_forward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, scale, calc_lse, causal);
-  }
-}
-
-
-std::vector<at::Tensor> fmha_backward(
+void fmha_forward_inference(
   at::Tensor Q, // B, Nt, H, D
   at::Tensor K, // B, Ns, H, D
   at::Tensor V, // B, Ns, H, D
   at::Tensor O, // B, Nt, H, D
+  float scale,
+  bool causal
+) {
+  if (Q.dtype() == torch::kFloat32) {
+    return fmha_forward_inference_<float, float, ArchTag>(Q, K, V, O, scale, causal);
+  } else {
+    return fmha_forward_inference_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, scale, causal);
+  }
+}
+
+
+void fmha_forward_training(
+  at::Tensor Q, // B, Nt, H, D
+  at::Tensor K, // B, Ns, H, D
+  at::Tensor V, // B, Ns, H, D
+  at::Tensor O, // B, Nt, H, D
+  at::Tensor lse, // B, H, Nt
+  float scale,
+  bool causal
+) {
+  if (Q.dtype() == torch::kFloat32) {
+    fmha_forward_training_<float, float, ArchTag>(Q, K, V, O, lse, scale, causal);
+  } else {
+    fmha_forward_training_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, lse, scale, causal);
+  }
+}
+
+
+void fmha_backward(
+  at::Tensor Q, // B, Nt, H, D
+  at::Tensor K, // B, Ns, H, D
+  at::Tensor V, // B, Ns, H, D
+  at::Tensor O, // B, Nt, H, D
+  at::Tensor dQ, // B, Nt, H, D
+  at::Tensor dK, // B, Ns, H, D
+  at::Tensor dV, // B, Ns, H, D
   at::Tensor dO, // B, Nt, H, D
   at::Tensor lse, // B, H, Nt
   at::Tensor delta, // B, H, Nt
@@ -282,8 +387,8 @@ std::vector<at::Tensor> fmha_backward(
   bool causal
 ) {
   if (Q.dtype() == torch::kFloat32) {
-    return fmha_backward_<float, float, ArchTag>(Q, K, V, O, dO, lse, delta, scale, causal);
+    fmha_backward_<float, float, ArchTag>(Q, K, V, O, dQ, dK, dV, dO, lse, delta, scale, causal);
   } else {
-    return fmha_backward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, dO, lse, delta, scale, causal);
+    fmha_backward_<c10::Half, cutlass::half_t, ArchTag>(Q, K, V, O, dQ, dK, dV, dO, lse, delta, scale, causal);
   }
 }
