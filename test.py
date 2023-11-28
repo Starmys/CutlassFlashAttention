@@ -25,7 +25,7 @@ def attention_forward_reference(
     return out
 
 
-def profile(fn, title, causal=False, warmup=2500, rep=10000):
+def profile(fn, title, causal=False, warmup=25, rep=100):
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
