@@ -64,7 +64,11 @@ void fmha_forward_inference_(
   p.logsumexp_ptr = nullptr;
   p.output_accum_ptr = nullptr;
   if (ForwardKernel::kNeedsOutputAccumulatorBuffer) {
-    cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
+    cudaError_t result = cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
+    if (result != cudaSuccess)  {
+      std::cerr << "Kernel execution error: " << cudaGetErrorString(result);
+      return;
+    }
   }
   p.output_ptr = (scalar_t*)(O.data_ptr<data_t>());
 
@@ -158,7 +162,11 @@ void fmha_forward_training_(
   p.logsumexp_ptr = nullptr;
   p.output_accum_ptr = nullptr;
   if (ForwardKernel::kNeedsOutputAccumulatorBuffer) {
-    cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
+    cudaError_t result = cudaMalloc(&p.output_accum_ptr, B * H * Nt * D * sizeof(typename ForwardKernel::output_accum_t));
+    if (result != cudaSuccess)  {
+      std::cerr << "Kernel execution error: " << cudaGetErrorString(result);
+      return;
+    }
   }
   p.output_ptr = (scalar_t*)(O.data_ptr<data_t>());
 
@@ -311,7 +319,11 @@ void fmha_backward_(
   p.num_splits_key = Ns / kMaxK;
 
   if (p.workspace_size()) {
-      cudaMalloc(&p.workspace, p.workspace_size());
+    cudaError_t result = cudaMalloc(&p.workspace, p.workspace_size());
+    if (result != cudaSuccess)  {
+      std::cerr << "Kernel execution error: " << cudaGetErrorString(result);
+      return;
+    }
   }
 
   auto kernel_fn = attention_kernel_backward_batched_impl<BackwardKernel>;
