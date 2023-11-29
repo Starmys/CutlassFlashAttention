@@ -258,7 +258,7 @@ void fmha_backward_(
     kBlockSizeJ, // kBlockSizeJ_,
     kMaxK,       // kMaxK
     false,       // kKeysQueriesAlignedToBlockSize
-    true         // kEnableSplitKeys
+    false        // kEnableSplitKeys
   >;
 
   typename BackwardKernel::Params p;
@@ -316,7 +316,7 @@ void fmha_backward_(
   p.lse_strideB = p.lse_strideH * H;
   p.delta_strideB = p.delta_strideH * H;
 
-  p.num_splits_key = Ns / kMaxK;
+  p.num_splits_key = 1;
 
   if (p.workspace_size()) {
     cudaError_t result = cudaMalloc(&p.workspace, p.workspace_size());

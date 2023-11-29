@@ -3,7 +3,7 @@ import torch
 from cutlass_flash_attention import FlashMultiHeadAttention
 
 
-BATCH, N_CTX, N_HEADS, D_HEAD = 1, 2048, 32, 128
+BATCH, N_CTX, N_HEADS, D_HEAD = 4, 2048, 32, 128
 
 
 def attention_forward_reference(
